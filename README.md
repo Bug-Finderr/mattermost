@@ -1,56 +1,135 @@
-# Assignment Submission Doc
+# Mattermost Elasticsearch Integration Project
 
-## Developer Setup
+## Problem Statement
 
-- Dev setup completed as per the [official Mattermost developer guide](https://developers.mattermost.com/contribute/developer-setup/).
+Mattermost's open-source SQL search struggles with large datasets (>2.5M posts), leading to slow performance and timeouts. The enterprise-grade Elasticsearch integration exists but is license-restricted.
 
-## Bulk Data Generation
+## Solution Approach
 
-- Used a [Python script](tools/gen_bulk_posts.py) to generate 5 million posts via the Mattermost API.
-- **To post in a specific channel (recommended):**
-  1. Get your team ID: `GET http://localhost:8065/api/v4/users/me/teams`
-  2. Get your desired channel ID: `GET http://localhost:8065/api/v4/users/me/teams/{team_id}/channels`
-  3. Set `CHANNEL_ID` in the script accordingly.
-- **To check the size and row count of the Posts table:**
-  1. Get your Postgres container ID: `docker ps | grep postgres`
-  2. Run:
+1. **Enable Enterprise Features**: Unlocked the existing Elasticsearch implementation in the Team Edition by modifications.
+2. **Benchmark Testing**: Found an approach to compare SQL vs. Elasticsearch performance.
 
-     ```zsh
-     docker exec -it <container_id> psql -U mmuser -d mattermost_test -c "SELECT pg_size_pretty(pg_total_relation_size('Posts')) AS total_size, COUNT(*) AS row_count FROM Posts;"
-     ```
+## Implementation Details
 
-- Time taken: >5 hours (single-threaded) for 3mil posts. Optimized version with threading took ~2hr for 2mil posts.
-- Search performance (SQL backend): Fast for simple queries, even at 5M posts. Time wasted!! Anyways...
-- Note: Real-world performance may degrade with more complex queries, concurrent users, or less powerful hardware.
-- **Ref:** [Elasticsearch is required for deployments with over 5 million posts to avoid significant performance issues](https://docs.mattermost.com/scale/elasticsearch.html#:~:text=For%20deployments%20with%20over%205%20million%20posts%2C%20Elasticsearch%20is%20required%20to%20avoid%20significant%20performance%20issues%20(such%20as%20timeouts)%20with%20search%20and%20at%2Dmentions.)
+### 1. Elasticsearch Integration
 
-## Elasticsearch Integration
+The Mattermost platform already includes a robust Elasticsearch integration in the `server/enterprise/elasticsearch` directory, which provides:
 
-Enabled Enterprise Elasticsearch features in Team Edition by modifying `server/channels/app/platform/license.go` to inject a fake license and `server/Makefile` to expose UI components.
+- Full text search across messages, files, and users
+- Autocomplete functionality with real-time suggestions
+- Language-aware tokenization and stemming
+- Result highlighting and relevance ranking
 
-- **To use the provided configuration for Elasticsearch and Docker services:**
-  1. Rename the config files as shown below:
+My implementation focused on enabling this existing functionality in the Team Edition.
 
-     ```zsh
-     # Rename config.copy.json and config.override.copy.mk to their active names
-     mv server/config/config.copy.json server/config/config.json
-     mv server/config.override.copy.mk server/config.override.mk
-     ```
+### 2. Data Generation for Testing
 
-     - These files contain the necessary settings for enabling Elasticsearch and running the required Docker services (including Elasticsearch, Postgres, etc.) on an M1 Mac or similar environment.
+> **Note:** I've removed my data generation scripts from this repository. The approach below is simpler to use.
 
-- **To run the server:**
-  1. In the `server` directory, run:
+## Usage Instructions
 
-     ```zsh
-     make run-server
-     ```
+### 1. Setup
 
-     This command automatically starts the necessary Docker containers (including Elasticsearch if configured in `config.override.mk`) and then runs the server.
+1. Configure Elasticsearch settings:
 
-- **To configure Elasticsearch in the webapp:**
-  1. Go to System Console → Environment → ElasticSearch.
+   ```bash
+   # Copy provided configuration files
+   cp server/config.copy.json server/config/config.json
+   cp server/config.override.example.mk server/config.override.mk
+   
+   # Edit the config files as needed
+   code server/config/config.json
+   ```
 
-## Next Steps
+2. Start the server with Elasticsearch:
 
-- Enable Elasticsearch, reindex, and compare search performance.
+   ```bash
+   cd server && make run-server
+   ```
+
+3. Generate initial data:
+
+   Instead of using just `server/bin/mmctl sampledata --local` as mentioned in the [developer setup guide](https://developers.mattermost.com/contribute/developer-setup/), use this below command:
+
+   ```bash
+   server/bin/mmctl sampledata --posts-per-channel 5000 --channels-per-team 100 --teams 10 --local
+   ```
+
+> **Note:** This is still a work in progress and hasn't been fully tested.
+
+4. Configure via System Console:
+    - Navigate to System Console → Environment → ElasticSearch
+    - Set connection details (default: <http://elasticsearch:9200>)
+    - Enable indexing, then build the index
+    - Enable Elasticsearch for search queries and autocomplete
+
+### 2. Monitor Performance
+
+You can either check the Volumes section in Docker Desktop or use the following command to check the size of the database and the number of posts:
+
+```bash
+POSTGRES_CONTAINER=$(docker ps | grep postgres | awk '{print $1}')
+
+docker exec -it $POSTGRES_CONTAINER psql -U mmuser -d mattermost_test -c \
+  "SELECT pg_size_pretty(pg_total_relation_size('Posts')) AS total_size, COUNT(*) AS row_count FROM Posts;"
+```
+
+## Data Generation Evolution
+
+### Initial Approach and Lessons Learned
+
+My initial data generation approach had limitations that affected testing quality:
+
+- All posts were created by a single user
+- Posts went into a single channel
+- Content varied only by post number and a random suffix
+- No threading or conversational structure
+
+Perf testing with this dataset showed minimal difference between SQL and Elasticsearch search despite 5M+ posts, which contradicted Mattermost's documentation about performance differences. This was likely because:
+
+1. Modern SQL databases can efficiently query homogeneous data, even at scale
+2. Elasticsearch's advantages only become apparent with diverse, complex content
+3. Real-world communication patterns (threads, multiple channels, varied authors) are required for meaningful benchmarking
+
+## Understanding Mattermost's Elasticsearch Implementation
+
+The Mattermost team designed their Elasticsearch integration with great architectural consideration. Looking at their implementation:
+
+1. **Pluggable Architecture**:
+   - The Elasticsearch engine is designed as a pluggable backend that can replace or augment the default database search
+   - Clear separation between search interface and implementation allows seamless switching between engines
+
+2. **Index Management**:
+   - Uses optimized index structure with user, channel, and post indices
+   - Post indexes are intelligently aggregated by date with configurable thresholds
+   - Built-in management for index lifecycle, updates, and purging
+
+3. **Advanced Integration Features**:
+   - Near real-time indexing with automatic job creation on post/user/channel changes
+   - Batch processing system for large-scale operations
+   - Robust error handling and recovery for interrupted indexing
+
+4. **Performance Optimizations**:
+   - Custom analyzers tailored for chat communication patterns
+   - Low overhead sync between database and search indices
+   - Efficient query construction to leverage Elasticsearch strengths
+   - Support for index aliasing to prevent downtime during reindexing
+
+The existing implementation is comprehensive, handling not just document search but also autocomplete, permissions, and channel-specific contexts.
+
+## Performance Evaluation
+
+**Work in Progress.** Initial observations suggest:
+
+- SQL search remains responsive for simple queries but degrades with complex terms
+- Elasticsearch shows consistent performance regardless of query complexity
+
+> **Note:** This is still a work in progress and hasn't been fully tested.
+
+## References
+
+- [Official Elasticsearch Documentation](https://docs.mattermost.com/scale/elasticsearch.html)
+
+<br />
+
+> _NOTE: This README was formatted by copilot_

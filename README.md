@@ -24,6 +24,10 @@
 - Note: Real-world performance may degrade with more complex queries, concurrent users, or less powerful hardware.
 - **Ref:** [Elasticsearch is required for deployments with over 5 million posts to avoid significant performance issues](https://docs.mattermost.com/scale/elasticsearch.html#:~:text=For%20deployments%20with%20over%205%20million%20posts%2C%20Elasticsearch%20is%20required%20to%20avoid%20significant%20performance%20issues%20(such%20as%20timeouts)%20with%20search%20and%20at%2Dmentions.)
 
+## Elasticsearch Integration
+
+Enabled Enterprise Elasticsearch features in Team Edition by modifying `server/channels/app/platform/license.go` to inject a fake license and `server/Makefile` to expose UI components. Configure via System Console → Environment → ElasticSearch after running `make run-server`.
+
 ## Next Steps
 
 - Enable Elasticsearch, reindex, and compare search performance.

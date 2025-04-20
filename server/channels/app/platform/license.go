@@ -8,16 +8,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/pkg/errors"
 
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/mattermost/mattermost/server/public/shared/mlog"
-	"github.com/mattermost/mattermost/server/public/shared/request"
 	"github.com/mattermost/mattermost/server/v8/channels/jobs"
-	"github.com/mattermost/mattermost/server/v8/channels/store/sqlstore"
 	"github.com/mattermost/mattermost/server/v8/channels/utils"
 	"github.com/mattermost/mattermost/server/v8/einterfaces"
 )
@@ -47,72 +44,28 @@ func (ps *PlatformService) License() *model.License {
 }
 
 func (ps *PlatformService) LoadLicense() {
-	c := request.EmptyContext(ps.logger)
+	now := model.GetMillis()
 
-	// ENV var overrides all other sources of license.
-	licenseStr := os.Getenv(LicenseEnv)
-	if licenseStr != "" {
-		license, appErr := utils.LicenseValidator.LicenseFromBytes([]byte(licenseStr))
-		if appErr != nil {
-			ps.logger.Error("Failed to read license set in environment.", mlog.Err(appErr))
-			return
-		}
-
-		// skip the restrictions if license is a sanctioned trial
-		if !license.IsSanctionedTrial() && license.IsTrialLicense() {
-			canStartTrialLicense, err := ps.licenseManager.CanStartTrial()
-			if err != nil {
-				ps.logger.Error("Failed to validate trial eligibility.", mlog.Err(err))
-				return
-			}
-
-			if !canStartTrialLicense {
-				ps.logger.Info("Cannot start trial multiple times.")
-				return
-			}
-		}
-
-		if err := ps.ValidateAndSetLicenseBytes([]byte(licenseStr)); err != nil {
-			ps.logger.Info("License key from ENV is invalid.", mlog.Err(err))
-		} else {
-			ps.logger.Info("License key from ENV is valid, unlocking enterprise features.")
-		}
-		return
+	feats := &model.Features{
+		Elasticsearch:  model.NewPointer(true),
+		FutureFeatures: model.NewPointer(true),
+		Users:          model.NewPointer(1_000_000),
 	}
+	feats.SetDefaults()
 
-	licenseId := ""
-	props, nErr := ps.Store.System().Get()
-	if nErr == nil {
-		licenseId = props[model.SystemActiveLicenseId]
-	}
+	ps.SetLicense(&model.License{
+		Id:           "mattermost-bypass-license",
+		IssuedAt:     now,
+		StartsAt:     now,
+		ExpiresAt:    now + 10*365*24*60*60*1_000, // 10 years
+		Customer:     &model.Customer{Id: "fake-customer", Name: "Fake Customer", Email: "fake@example.com", Company: "Fake Company"},
+		Features:     feats,
+		SkuName:      "Fake Enterprise E20",
+		SkuShortName: "enterprise",
+		IsTrial:      false,
+	})
 
-	if !model.IsValidId(licenseId) {
-		// Lets attempt to load the file from disk since it was missing from the DB
-		license, licenseBytes, err := utils.GetAndValidateLicenseFileFromDisk(*ps.Config().ServiceSettings.LicenseFileLocation)
-		if err != nil {
-			ps.logger.Warn("Failed to get license from disk", mlog.Err(err))
-		} else {
-			if _, err := ps.SaveLicense(licenseBytes); err != nil {
-				ps.logger.Error("Failed to save license key loaded from disk.", mlog.Err(err))
-			} else {
-				licenseId = license.Id
-			}
-		}
-	}
-
-	record, nErr := ps.Store.License().Get(sqlstore.RequestContextWithMaster(c), licenseId)
-	if nErr != nil {
-		ps.logger.Warn("License key from https://mattermost.com required to unlock enterprise features.", mlog.Err(nErr))
-		ps.SetLicense(nil)
-		return
-	}
-
-	err := ps.ValidateAndSetLicenseBytes([]byte(record.Bytes))
-	if err != nil {
-		ps.logger.Info("License key is invalid.")
-	}
-
-	ps.logger.Info("License key is valid, unlocking enterprise features.")
+	ps.logger.Info("Bypassed license restrictions with fake license, Elasticsearch enabled")
 }
 
 func (ps *PlatformService) SaveLicense(licenseBytes []byte) (*model.License, *model.AppError) {

@@ -13,6 +13,9 @@ ifeq ($(shell uname)/$(shell uname -m),Darwin/arm64)
   ARM_BASED_MAC = true
 endif
 
+# Filter out any compiler-specific flags that shouldn't be passed to Go linker
+LDFLAGS := $(filter-out -L%, $(LDFLAGS))
+
 define LICENSE_HEADER
 // Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
@@ -51,25 +54,12 @@ MMCTL_LDFLAGS += -X "$(MMCTL_PKG).buildDate=$(MMCTL_BUILD_DATE)"
 # Enterprise
 BUILD_ENTERPRISE_DIR ?= ../../enterprise
 BUILD_ENTERPRISE ?= true
-BUILD_ENTERPRISE_READY = false
-BUILD_TYPE_NAME = team
+BUILD_ENTERPRISE_READY = true
+BUILD_TYPE_NAME = enterprise
 BUILD_HASH_ENTERPRISE = none
 ifneq ($(wildcard $(BUILD_ENTERPRISE_DIR)/.),)
 	MMCTL_TESTFLAGS += -ldflags '-X "$(MMCTL_PKG).EnableEnterpriseTests=true" -X "github.com/mattermost/mattermost/server/public/model.BuildEnterpriseReady=true"'
 	MMCTL_BUILD_TAGS += enterprise
-
-  ifeq ($(BUILD_ENTERPRISE),true)
-	BUILD_ENTERPRISE_READY = true
-	BUILD_TYPE_NAME = enterprise
-	BUILD_HASH_ENTERPRISE = $(shell cd $(BUILD_ENTERPRISE_DIR) && git rev-parse HEAD)
-	BUILD_TAGS += enterprise
-  else
-	BUILD_ENTERPRISE_READY = false
-	BUILD_TYPE_NAME = team
-  endif
-else
-	BUILD_ENTERPRISE_READY = false
-	BUILD_TYPE_NAME = team
 endif
 
 # Clean up the old means of importing enterprise source, if it exists
@@ -399,9 +389,6 @@ ifneq ($(IGNORE_GO_WORK_IF_EXISTS),true)
 	$(GO) work init
 	$(GO) work use .
 	$(GO) work use ./public
-ifeq ($(BUILD_ENTERPRISE_READY),true)
-	$(GO) work use ../../enterprise
-endif
 endif
 
 check-style: plugin-checker vet golangci-lint ## Runs style/lint checks

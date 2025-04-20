@@ -15,7 +15,7 @@
   1. Get your Postgres container ID: `docker ps | grep postgres`
   2. Run:
 
-     ```
+     ```zsh
      docker exec -it <container_id> psql -U mmuser -d mattermost_test -c "SELECT pg_size_pretty(pg_total_relation_size('Posts')) AS total_size, COUNT(*) AS row_count FROM Posts;"
      ```
 
@@ -26,7 +26,30 @@
 
 ## Elasticsearch Integration
 
-Enabled Enterprise Elasticsearch features in Team Edition by modifying `server/channels/app/platform/license.go` to inject a fake license and `server/Makefile` to expose UI components. Configure via System Console → Environment → ElasticSearch after running `make run-server`.
+Enabled Enterprise Elasticsearch features in Team Edition by modifying `server/channels/app/platform/license.go` to inject a fake license and `server/Makefile` to expose UI components.
+
+- **To use the provided configuration for Elasticsearch and Docker services:**
+  1. Rename the config files as shown below:
+
+     ```zsh
+     # Rename config.copy.json and config.override.copy.mk to their active names
+     mv server/config/config.copy.json server/config/config.json
+     mv server/config.override.copy.mk server/config.override.mk
+     ```
+
+     - These files contain the necessary settings for enabling Elasticsearch and running the required Docker services (including Elasticsearch, Postgres, etc.) on an M1 Mac or similar environment.
+
+- **To run the server:**
+  1. In the `server` directory, run:
+
+     ```zsh
+     make run-server
+     ```
+
+     This command automatically starts the necessary Docker containers (including Elasticsearch if configured in `config.override.mk`) and then runs the server.
+
+- **To configure Elasticsearch in the webapp:**
+  1. Go to System Console → Environment → ElasticSearch.
 
 ## Next Steps
 

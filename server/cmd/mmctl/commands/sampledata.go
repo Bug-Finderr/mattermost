@@ -5,14 +5,18 @@
 package commands
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"math/rand"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/mattermost/mattermost/server/v8/cmd/mmctl/client"
@@ -31,6 +35,7 @@ const (
 	deactivatedUser = "deactivated"
 	guestUser       = "guest"
 	attachmentsDir  = "attachments"
+	encodeUserError = "cannot encode user line: %w"
 )
 
 var SampledataCmd = &cobra.Command{
@@ -188,6 +193,35 @@ func processProfileImagesDir(profileImagesPath, tmpDir, bulk string) ([]string, 
 	return profileImages, nil
 }
 
+func efficientSortedRandomDates(size int) []int64 {
+	if size <= 0 {
+		return []int64{}
+	}
+
+	dates := make([]int64, size)
+	now := model.GetMillis()
+
+	// Skip sorting for large datasets by generating incrementally
+	// This dramatically reduces CPU usage for large datasets
+	if size > 10000 {
+		startTime := now - int64(31557600000) // About 1 year ago
+		for i := 0; i < size; i++ {
+			// Small random increment keeps dates in order but still random
+			increment := rand.Int63n(100000) // Random increment up to ~1.6 minutes
+			startTime += increment
+			dates[i] = startTime
+		}
+		return dates
+	}
+
+	// Original approach for smaller datasets
+	for i := 0; i < size; i++ {
+		dates[i] = now - int64(rand.Intn(31557600000))
+	}
+	sort.Slice(dates, func(i, j int) bool { return dates[i] < dates[j] })
+	return dates
+}
+
 //nolint:gocyclo
 func sampledataCmdF(c client.Client, command *cobra.Command, args []string) error {
 	seed, _ := command.Flags().GetInt64("seed")
@@ -299,7 +333,7 @@ func sampledataCmdF(c client.Client, command *cobra.Command, args []string) erro
 	for i := 0; i < users; i++ {
 		userLine := createUser(i, teamMemberships, channelMemberships, teamsAndChannels, profileImages, "")
 		if err := encoder.Encode(userLine); err != nil {
-			return fmt.Errorf("cannot encode user line: %w", err)
+			return fmt.Errorf(encodeUserError, err)
 		}
 		allUsers[allUsersIndex] = *userLine.User.Username
 		allUsersIndex++
@@ -307,7 +341,7 @@ func sampledataCmdF(c client.Client, command *cobra.Command, args []string) erro
 	for i := 0; i < guests; i++ {
 		userLine := createUser(i, teamMemberships, channelMemberships, teamsAndChannels, profileImages, guestUser)
 		if err := encoder.Encode(userLine); err != nil {
-			return fmt.Errorf("cannot encode user line: %w", err)
+			return fmt.Errorf(encodeUserError, err)
 		}
 		allUsers[allUsersIndex] = *userLine.User.Username
 		allUsersIndex++
@@ -321,18 +355,125 @@ func sampledataCmdF(c client.Client, command *cobra.Command, args []string) erro
 		allUsersIndex++
 	}
 
-	for team, channels := range teamsAndChannels {
-		for _, channel := range channels {
-			dates := sortedRandomDates(postsPerChannel)
+	// --- parallel posts generation with buffered writer ---
+	type postJob struct {
+		team, channel string
+		dates         []int64
+	}
 
-			for i := 0; i < postsPerChannel; i++ {
-				postLine := createPost(team, channel, allUsers, dates[i])
-				if err := encoder.Encode(postLine); err != nil {
-					return fmt.Errorf("cannot encode post line: %w", err)
-				}
+	// Create a buffer pool to reduce GC pressure
+	bufferPool := &sync.Pool{
+		New: func() interface{} {
+			// 3MB initial capacity per buffer (based on ~1.5KB per post × 2048 posts)
+			return bytes.NewBuffer(make([]byte, 0, 3*1024*1024))
+		},
+	}
+
+	// Optimize worker count based on CPU cores
+	cpus := runtime.NumCPU()
+	workers := cpus * 2
+	if cpus >= 8 {
+		workers = cpus // On high-core systems, avoid over-subscription
+	}
+
+	// Larger batch size for fewer context switches
+	const batchSize = 4096
+	// Larger channel buffer to prevent blocking
+	writeChan := make(chan []byte, workers*4)
+
+	// Generate jobs asynchronously to avoid memory pressure
+	jobs := make(chan postJob, 100)
+	go func() {
+		defer close(jobs)
+		for team, channels := range teamsAndChannels {
+			for _, ch := range channels {
+				// Use the efficient date generation that avoids expensive sorting
+				jobs <- postJob{team, ch, efficientSortedRandomDates(postsPerChannel)}
 			}
 		}
+	}()
+
+	var workerWg sync.WaitGroup
+	var writerWg sync.WaitGroup
+
+	workerWg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func(workerID int) {
+			defer workerWg.Done()
+
+			// Get buffer from pool to reduce allocations
+			buffer := bufferPool.Get().(*bytes.Buffer)
+			buffer.Reset()
+			defer bufferPool.Put(buffer)
+
+			postCount := 0
+			encoder := json.NewEncoder(buffer)
+
+			for job := range jobs {
+				for _, at := range job.dates {
+					line := createPost(job.team, job.channel, allUsers, at)
+					if err := encoder.Encode(line); err != nil {
+						printer.PrintError(fmt.Sprintf("Error encoding post: %v", err))
+						continue
+					}
+
+					postCount++
+					if postCount >= batchSize {
+						// Copy buffer and send to writer
+						data := make([]byte, buffer.Len())
+						copy(data, buffer.Bytes())
+						writeChan <- data
+						buffer.Reset()
+						postCount = 0
+					}
+				}
+			}
+
+			// Send any remaining posts
+			if buffer.Len() > 0 {
+				data := make([]byte, buffer.Len())
+				copy(data, buffer.Bytes())
+				writeChan <- data
+			}
+		}(i)
 	}
+
+	// Optimize writer
+	writerWg.Add(1)
+	go func() {
+		defer writerWg.Done()
+
+		// Use a much larger buffer (8MB) to minimize syscalls
+		bufferedWriter := bufio.NewWriterSize(bulkFile, 8*1024*1024)
+		defer bufferedWriter.Flush()
+
+		// Count bytes written since last flush
+		bytesWritten := 0
+		flushThreshold := 4 * 1024 * 1024 // 4MB
+
+		for data := range writeChan {
+			n, err := bufferedWriter.Write(data)
+			if err != nil {
+				printer.PrintError("Error writing batch: " + err.Error())
+				continue
+			}
+
+			// Track bytes written and flush periodically to avoid excessive buffering
+			bytesWritten += n
+			if bytesWritten >= flushThreshold {
+				bufferedWriter.Flush()
+				bytesWritten = 0
+			}
+		}
+	}()
+
+	// Wait for all workers to complete
+	workerWg.Wait()
+	// Signal writer that no more data is coming
+	close(writeChan)
+	// Wait for writer to finish
+	writerWg.Wait()
+	// --- done parallel posts generation ---
 
 	for i := 0; i < directChannels; i++ {
 		user1 := allUsers[rand.Intn(len(allUsers))]

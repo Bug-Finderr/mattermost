@@ -61,7 +61,7 @@ Improvements:
 
    ```bash
    # Generates ~5 million posts (takes ~1 hour)
-   server/bin/mmctl sampledata --posts-per-channel 5000 --channels-per-team 100 --teams 10 --local
+   server/bin/mmctl sampledata --users 100 --teams 10 --channels-per-team 10 --posts-per-channel 50000 --local
    ```
 
 4. Add sysadmin to all teams and channels:
@@ -78,15 +78,16 @@ Improvements:
     - Enter connection details (usually `http://elasticsearch:9200`)
     - Click "Enable Indexing", then "Build Index"
     - Click "Enable Elasticsearch for search queries" and "Enable Elasticsearch for autocomplete"
+    - **Important:** By default, both SQL and Elasticsearch search might be disabled in the configuration (`config.json`).
+        - To enable **SQL Search** (for comparison): Go to `System Console → Environment → Database` and set `Disable database search` to `false`.
+        - To enable **Elasticsearch Search**: Ensure `Disable database search` is set to `true` (its default) and follow the Elasticsearch enabling steps above. You need to toggle `Disable database search` depending on which system you are testing.
 
 ### 2. Monitor Performance
 
-```bash
-# Check database size and post count
-POSTGRES_CONTAINER=$(docker ps | grep postgres | awk '{print $1}')
+Run this script to check the database size and row counts for key tables:
 
-docker exec -it $POSTGRES_CONTAINER psql -U mmuser -d mattermost_test -c \
-  "SELECT pg_size_pretty(pg_total_relation_size('Posts')) AS total_size, COUNT(*) AS row_count FROM Posts;"
+```bash
+./db_size.sh
 ```
 
 ## Data Generation Evolution
@@ -112,15 +113,15 @@ To enable the Elasticsearch feature, a few changes were made in `server/channels
 - License checks were slightly changed to accept this fake license.
 - This allows the Elasticsearch engine, normally restricted, to connect to Mattermost's search interface.
 
+**Note on Testing:** To better observe performance differences during manual testing, the post retrieval limit was increased from 100 to 1000 in `server/channels/store/sqlstore/post_store.go` (around line 2065).
+
 ## Performance Evaluation
 
-**Work in Progress.**
-
 - The optimized `mmctl sampledata` quickly creates large datasets (~1 hour for 5M+ posts).
-- SQL search slows down with complex searches on large datasets.
-- Elasticsearch search speed seems consistent, regardless of search complexity.
+- **Qualitative Observation:** SQL search noticeably slows down with complex search terms or filters on large datasets (5M+ posts) to return results in the UI.
+- **Qualitative Observation:** Elasticsearch search speed remains consistently fast, returning results almost instantly in the UI, regardless of search complexity or dataset size.
 
-> **Note:** Testing continues. The `mmctl_bench.sh` script helps measure the speed of the `sampledata` command itself. Further tests will compare SQL vs. Elasticsearch search times.
+**Measuring Precise Timings:** Accurately measuring the end-to-end search time using browser developer tools is challenging. The search action triggers multiple asynchronous network calls (initial fetch, user/channel details, etc.), making it difficult to isolate the pure search backend processing time from network latency and subsequent client-side rendering. Therefore, precise timings (like those in the previous mock table) are not provided, but the qualitative difference in user experience is significant.
 
 ## References
 

@@ -2062,7 +2062,7 @@ func (s *SqlPostStore) search(teamId string, userId string, params *model.Search
 		Where("q2.DeleteAt = 0").
 		Where(fmt.Sprintf("q2.Type NOT LIKE '%s%%'", model.PostSystemMessagePrefix)).
 		OrderByClause("q2.CreateAt DESC").
-		Limit(100)
+		Limit(1000)
 
 	var err error
 	baseQuery, err = s.buildSearchPostFilterClause(teamId, params.FromUsers, params.ExcludedUsers, userByUsername, baseQuery)
